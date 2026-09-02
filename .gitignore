@@ -1,1 +1,8 @@
-
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.streamlit/secrets.toml
+*.xlsx
+.DS_Store
