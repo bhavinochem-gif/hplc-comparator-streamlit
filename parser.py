@@ -31,38 +31,43 @@ class HplcReport:
 
 
 class HplcPdfParser:
+    # Handles "Sample Name:", "Injection Name :-", "Sample ID =", etc.
     SAMPLE_PATTERN = re.compile(
-        r"(?i)(?:Sample\s*Name|Sample\s*ID|Sample)\s*[:=\t]+\s*([^\r\n|]+)"
+        r"(?i)(?:Sample\s*Name|Sample\s*ID|Injection\s*Name|Sample)\s*[:=\-\t]+\s*([^\r\n|]+)"
     )
     BATCH_PATTERN = re.compile(
-        r"(?i)(?:Batch\s*(?:No|ID|Name)?|Lot\s*(?:No|ID)?|Vial\s*#?)\s*[:=\t]+\s*([A-Za-z0-9_\-\.]+)"
+        r"(?i)(?:Batch\s*(?:No|ID|Name)?|Lot\s*(?:No|ID)?|Vial\s*#?)\s*[:=\-\t]+\s*([A-Za-z0-9_\-\.]+)"
     )
 
-    # Wavelength / Channel Signals
-    AGILENT_SIGNAL_WL = re.compile(
-        r"(?i)(?:Sig(?:nal)?\s*\d*[:=]|Sig=)\s*(?:DAD\d*\s*[A-Z],\s*Sig=)?(\d{3})"
-    )
-    SHIMADZU_CHANNEL_WL = re.compile(
-        r"(?i)(?:PDA\s*Multi\s*\d*\s*\/|Detector\s*[A-Z]-Ch\d*[:\s]+|Channel\s*\d*\s*:\s*)(\d{3})\s*nm"
-    )
-    WATERS_CHANNEL_WL = re.compile(
-        r"(?i)(?:Channel\s*(?:Description)?[:\s]+|PDA\s+)(\d{3})\s*nm"
-    )
-    GENERIC_WL = re.compile(r"(?i)\b(?:Wavelength|Channel|Lambda)\s*[:=]?\s*(\d{3})\s*nm\b")
+    # Wavelength patterns
+    CHROMELEON_WL = re.compile(r"(?i)Wavelength\s*[:=\-\t]+\s*(\d{3})\s*nm")
+    AGILENT_SIGNAL_WL = re.compile(r"(?i)(?:Sig(?:nal)?\s*\d*[:=]|Sig=)\s*(?:DAD\d*\s*[A-Z],\s*Sig=)?(\d{3})")
+    SHIMADZU_CHANNEL_WL = re.compile(r"(?i)(?:PDA\s*Multi\s*\d*\s*\/|Detector\s*[A-Z]-Ch\d*[:\s]+|Channel\s*\\d*\\s*:\\s*)(\d{3})\s*nm")
+    WATERS_CHANNEL_WL = re.compile(r"(?i)(?:Channel\s*(?:Description)?[:\s]+|PDA\s+)(\d{3})\s*nm")
+    GENERIC_WL = re.compile(r"(?i)\b(?:Wavelength|Channel|Lambda)\s*[:=\-]?\s*(\d{3})\s*nm\b")
 
-    # Multi-Vendor Peak Row Regexes
+    # 1. Dionex / Thermo Chromeleon: Peak# | RT | Name | Area | %Area | Height | Rel.Ret | Type
+    CHROMELEON_ROW_PATTERN = re.compile(
+        r"^\s*(\d+)\s+(\d+\.\d{2,4})\s+([A-Za-z0-9_\-\s]+?)\s+(\d+(?:\.\d+)?)\s+(\d+\.\d{2,4})\s+(\d+(?:\.\d+)?)(?:\s+(\d+\.\d{2,4}))?(?:\s+([A-Za-z0-9\*_\s]+))?\s*$"
+    )
+
+    # 2. Agilent OpenLab / ChemStation
     AGILENT_ROW_PATTERN = re.compile(
         r"^\s*(\d+)?\s+(\d+\.\d{2,4})\s+(?:[A-Za-z]{2,4}|\.\.|--)\s+(?:\d+\.\d{2,4}\s+)?(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s+(\d+\.\d{2,4})(?:\s+(.+))?$"
     )
     AGILENT_ALT_PATTERN = re.compile(
         r"^\s*(\d+\.\d{2,4})\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s+(\d+\.\d{2,4})(?:\s+(.+))?$"
     )
+
+    # 3. Shimadzu LabSolutions
     SHIMADZU_NAMED_PATTERN = re.compile(
         r"^\s*\d+\s+([A-Za-z0-9_\-\s]+?)\s+(\d+\.\d{2,4})\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s+(\d+\.\d{2,4})\s*$"
     )
     SHIMADZU_STD_PATTERN = re.compile(
         r"^\s*\d+\s+(\d+\.\d{2,4})\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s+(\d+\.\d{2,4})(?:\s+(.+))?\s*$"
     )
+
+    # 4. Waters Empower
     WATERS_ROW_PATTERN = re.compile(
         r"^\s*(\S+)?\s+(\d+\.\d{2,4})\s+(\d+(?:\.\d+)?)\s+(\d+\.\d{2,4})\s+(\d+(?:\.\d+)?)\s*$"
     )
@@ -70,6 +75,8 @@ class HplcPdfParser:
     @staticmethod
     def detect_cds(text: str) -> str:
         text_lower = text.lower()
+        if any(k in text_lower for k in ["chromeleon", "dionex"]):
+            return "DIONEX_CHROMELEON"
         if any(k in text_lower for k in ["agilent", "chemstation", "openlab"]):
             return "AGILENT_OPENLAB"
         if any(k in text_lower for k in ["shimadzu", "labsolutions", "lcsolution"]):
@@ -80,7 +87,7 @@ class HplcPdfParser:
 
     @classmethod
     def extract_wavelength(cls, line: str) -> Optional[int]:
-        for pattern in [cls.AGILENT_SIGNAL_WL, cls.SHIMADZU_CHANNEL_WL, cls.WATERS_CHANNEL_WL, cls.GENERIC_WL]:
+        for pattern in [cls.CHROMELEON_WL, cls.AGILENT_SIGNAL_WL, cls.SHIMADZU_CHANNEL_WL, cls.WATERS_CHANNEL_WL, cls.GENERIC_WL]:
             m = pattern.search(line)
             if m:
                 return int(m.group(1))
@@ -102,7 +109,7 @@ class HplcPdfParser:
 
         for line in raw_content.splitlines():
             line = line.strip()
-            if not line:
+            if not line or line.startswith("Total"):
                 continue
 
             if not report.sample_name:
@@ -112,7 +119,7 @@ class HplcPdfParser:
 
             if not report.batch_id:
                 m_batch = self.BATCH_PATTERN.search(line)
-                if m_batch:
+                if m_batch and m_batch.group(1).lower() != "n.a.":
                     report.batch_id = m_batch.group(1).strip()
 
             detected_wl = self.extract_wavelength(line)
@@ -127,19 +134,29 @@ class HplcPdfParser:
         return report
 
     def _parse_peak_line(self, line: str, report: HplcReport, wavelength: int):
-        cds = report.cds_source
-        if cds == "AGILENT_OPENLAB" and self._try_agilent(line, report, wavelength):
+        # 1. Try Chromeleon first if detected or fallback
+        if self._try_chromeleon(line, report, wavelength):
             return
-        if cds == "SHIMADZU_LABSOLUTIONS" and self._try_shimadzu(line, report, wavelength):
-            return
-        if cds == "WATERS_EMPOWER" and self._try_waters(line, report, wavelength):
-            return
-
+        # 2. Try Waters Empower
         if self._try_waters(line, report, wavelength):
             return
+        # 3. Try Shimadzu
         if self._try_shimadzu(line, report, wavelength):
             return
+        # 4. Try Agilent
         self._try_agilent(line, report, wavelength)
+
+    def _try_chromeleon(self, line: str, report: HplcReport, wl: int) -> bool:
+        m = self.CHROMELEON_ROW_PATTERN.match(line)
+        if m:
+            rt = float(m.group(2))
+            name = m.group(3).strip()
+            area = float(m.group(4))
+            pct_area = float(m.group(5))
+            height = float(m.group(6))
+            self._add_peak(report, name, rt, area, pct_area, height, wl)
+            return True
+        return False
 
     def _try_agilent(self, line: str, report: HplcReport, wl: int) -> bool:
         m = self.AGILENT_ROW_PATTERN.match(line)
