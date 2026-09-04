@@ -12,6 +12,7 @@ class Peak:
     area: float
     percent_area: float
     height: float
+    rel_rt: Optional[float] = None
     wavelength: int = 0
 
 
@@ -31,7 +32,6 @@ class HplcReport:
 
 
 class HplcPdfParser:
-    # Handles "Sample Name:", "Injection Name :-", "Sample ID =", etc.
     SAMPLE_PATTERN = re.compile(
         r"(?i)(?:Sample\s*Name|Sample\s*ID|Injection\s*Name|Sample)\s*[:=\-\t]+\s*([^\r\n|]+)"
     )
@@ -39,35 +39,19 @@ class HplcPdfParser:
         r"(?i)(?:Batch\s*(?:No|ID|Name)?|Lot\s*(?:No|ID)?|Vial\s*#?)\s*[:=\-\t]+\s*([A-Za-z0-9_\-\.]+)"
     )
 
-    # Wavelength patterns
     CHROMELEON_WL = re.compile(r"(?i)Wavelength\s*[:=\-\t]+\s*(\d{3})\s*nm")
     AGILENT_SIGNAL_WL = re.compile(r"(?i)(?:Sig(?:nal)?\s*\d*[:=]|Sig=)\s*(?:DAD\d*\s*[A-Z],\s*Sig=)?(\d{3})")
-    SHIMADZU_CHANNEL_WL = re.compile(r"(?i)(?:PDA\s*Multi\s*\d*\s*\/|Detector\s*[A-Z]-Ch\d*[:\s]+|Channel\s*\\d*\\s*:\\s*)(\d{3})\s*nm")
+    SHIMADZU_CHANNEL_WL = re.compile(r"(?i)(?:PDA\s*Multi\s*\d*\s*\/|Detector\s*[A-Z]-Ch\d*[:\s]+|Channel\s*\d*\s*:\s*)(\d{3})\s*nm")
     WATERS_CHANNEL_WL = re.compile(r"(?i)(?:Channel\s*(?:Description)?[:\s]+|PDA\s+)(\d{3})\s*nm")
     GENERIC_WL = re.compile(r"(?i)\b(?:Wavelength|Channel|Lambda)\s*[:=\-]?\s*(\d{3})\s*nm\b")
 
-    # 1. Dionex / Thermo Chromeleon: Peak# | RT | Name | Area | %Area | Height | Rel.Ret | Type
+    # Chromeleon Peak Row: Peak# | Ret.Time | Peak Name | Area | Area % | Height | Rel.Ret | Type
     CHROMELEON_ROW_PATTERN = re.compile(
         r"^\s*(\d+)\s+(\d+\.\d{2,4})\s+([A-Za-z0-9_\-\s]+?)\s+(\d+(?:\.\d+)?)\s+(\d+\.\d{2,4})\s+(\d+(?:\.\d+)?)(?:\s+(\d+\.\d{2,4}))?(?:\s+([A-Za-z0-9\*_\s]+))?\s*$"
     )
-
-    # 2. Agilent OpenLab / ChemStation
     AGILENT_ROW_PATTERN = re.compile(
         r"^\s*(\d+)?\s+(\d+\.\d{2,4})\s+(?:[A-Za-z]{2,4}|\.\.|--)\s+(?:\d+\.\d{2,4}\s+)?(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s+(\d+\.\d{2,4})(?:\s+(.+))?$"
     )
-    AGILENT_ALT_PATTERN = re.compile(
-        r"^\s*(\d+\.\d{2,4})\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s+(\d+\.\d{2,4})(?:\s+(.+))?$"
-    )
-
-    # 3. Shimadzu LabSolutions
-    SHIMADZU_NAMED_PATTERN = re.compile(
-        r"^\s*\d+\s+([A-Za-z0-9_\-\s]+?)\s+(\d+\.\d{2,4})\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s+(\d+\.\d{2,4})\s*$"
-    )
-    SHIMADZU_STD_PATTERN = re.compile(
-        r"^\s*\d+\s+(\d+\.\d{2,4})\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s+(\d+\.\d{2,4})(?:\s+(.+))?\s*$"
-    )
-
-    # 4. Waters Empower
     WATERS_ROW_PATTERN = re.compile(
         r"^\s*(\S+)?\s+(\d+\.\d{2,4})\s+(\d+(?:\.\d+)?)\s+(\d+\.\d{2,4})\s+(\d+(?:\.\d+)?)\s*$"
     )
@@ -96,7 +80,6 @@ class HplcPdfParser:
     def parse(self, file_bytes: bytes, filename: str) -> HplcReport:
         report = HplcReport(file_name=filename)
         reader = PdfReader(io.BytesIO(file_bytes))
-
         full_text = []
         for page in reader.pages:
             t = page.extract_text()
@@ -130,20 +113,13 @@ class HplcPdfParser:
 
         if not report.sample_name:
             report.sample_name = re.sub(r"(?i)\.pdf$", "", filename)
-
         return report
 
     def _parse_peak_line(self, line: str, report: HplcReport, wavelength: int):
-        # 1. Try Chromeleon first if detected or fallback
         if self._try_chromeleon(line, report, wavelength):
             return
-        # 2. Try Waters Empower
         if self._try_waters(line, report, wavelength):
             return
-        # 3. Try Shimadzu
-        if self._try_shimadzu(line, report, wavelength):
-            return
-        # 4. Try Agilent
         self._try_agilent(line, report, wavelength)
 
     def _try_chromeleon(self, line: str, report: HplcReport, wl: int) -> bool:
@@ -154,7 +130,8 @@ class HplcPdfParser:
             area = float(m.group(4))
             pct_area = float(m.group(5))
             height = float(m.group(6))
-            self._add_peak(report, name, rt, area, pct_area, height, wl)
+            rel_rt = float(m.group(7)) if m.group(7) else None
+            self._add_peak(report, name, rt, area, pct_area, height, rel_rt, wl)
             return True
         return False
 
@@ -162,24 +139,7 @@ class HplcPdfParser:
         m = self.AGILENT_ROW_PATTERN.match(line)
         if m:
             name = m.group(6).strip() if m.group(6) else "Unknown"
-            self._add_peak(report, name, float(m.group(2)), float(m.group(3)), float(m.group(5)), float(m.group(4)), wl)
-            return True
-        m2 = self.AGILENT_ALT_PATTERN.match(line)
-        if m2:
-            name = m2.group(5).strip() if m2.group(5) else "Unknown"
-            self._add_peak(report, name, float(m2.group(1)), float(m2.group(2)), float(m2.group(4)), float(m2.group(3)), wl)
-            return True
-        return False
-
-    def _try_shimadzu(self, line: str, report: HplcReport, wl: int) -> bool:
-        m = self.SHIMADZU_NAMED_PATTERN.match(line)
-        if m:
-            self._add_peak(report, m.group(1).strip(), float(m.group(2)), float(m.group(3)), float(m.group(5)), float(m.group(4)), wl)
-            return True
-        m2 = self.SHIMADZU_STD_PATTERN.match(line)
-        if m2:
-            name = m2.group(5).strip() if m2.group(5) else "Unknown"
-            self._add_peak(report, name, float(m2.group(1)), float(m2.group(2)), float(m2.group(4)), float(m2.group(3)), wl)
+            self._add_peak(report, name, float(m.group(2)), float(m.group(3)), float(m.group(5)), float(m.group(4)), None, wl)
             return True
         return False
 
@@ -187,12 +147,12 @@ class HplcPdfParser:
         m = self.WATERS_ROW_PATTERN.match(line)
         if m:
             name = m.group(1).strip() if m.group(1) else "Unknown"
-            self._add_peak(report, name, float(m.group(2)), float(m.group(3)), float(m.group(4)), float(m.group(5)), wl)
+            self._add_peak(report, name, float(m.group(2)), float(m.group(3)), float(m.group(4)), float(m.group(5)), None, wl)
             return True
         return False
 
     @staticmethod
-    def _add_peak(report: HplcReport, name: str, rt: float, area: float, pct_area: float, height: float, wl: int):
+    def _add_peak(report: HplcReport, name: str, rt: float, area: float, pct_area: float, height: float, rel_rt: Optional[float], wl: int):
         if rt > 0.0 and 0.0 <= pct_area <= 100.0 and area >= 0.0:
             report.add_peak(Peak(
                 name=name,
@@ -200,5 +160,6 @@ class HplcPdfParser:
                 area=area,
                 percent_area=pct_area,
                 height=height,
+                rel_rt=rel_rt,
                 wavelength=wl
             ))
