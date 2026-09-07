@@ -8,9 +8,8 @@ from parser import HplcPdfParser
 st.set_page_config(page_title="HPLC Batch Impurity Matrix Comparator", layout="wide")
 
 st.title("🔬 HPLC Batch-wise Impurity Matrix Comparator")
-st.markdown("Automate comparative analytical impurity profiling across multiple batches with support for incremental Excel merging.")
+st.markdown("Automate comparative analytical impurity profiling across multiple batches with dynamic column detection and incremental Excel merging.")
 
-# Ingestion Panels
 col_up1, col_up2 = st.columns([1, 1])
 
 with col_up1:
@@ -22,7 +21,7 @@ with col_up1:
 
 with col_up2:
     new_pdf_files = st.file_uploader(
-        "📄 Upload New HPLC PDF Reports (Waters, Chromeleon, Agilent)",
+        "📄 Upload New HPLC PDF Reports (Waters, Chromeleon, Agilent, Shimadzu)",
         type=["pdf"],
         accept_multiple_files=True
     )
@@ -44,11 +43,10 @@ with st.expander("🔍 Extraction Log & Ingested Files Status", expanded=False):
         st.info(f"Loaded existing comparison workbook: **{existing_excel_file.name}**")
     for r in new_reports:
         if len(r.peaks) > 0:
-            st.success(f"**{r.file_name}** — Injected: `{r.sample_name}` | Batch: `{r.batch_id}` | Peaks: **{len(r.peaks)}**")
+            st.success(f"**{r.file_name}** — Injected: `{r.sample_name}` | Batch: `{r.batch_id}` | Software: `{r.cds_source}` | Peaks: **{len(r.peaks)}**")
         else:
             st.error(f"**{r.file_name}** — ⚠️ 0 peaks detected. Ensure it is a vector digital PDF.")
 
-# Alignment Parameters
 col1, col2, col3 = st.columns([1, 1, 1.2])
 
 all_detected_wl = set()
@@ -80,7 +78,12 @@ preview = HplcComparator.build_or_merge_matrix(
     target_main_rt=None,
     target_wavelength=selected_wl
 )
-candidate_rts = sorted(list(set(preview.main_peak_rts.values()))) if preview.main_peak_rts else [16.366]
+
+# Filter candidate RTs to positive non-zero values
+raw_candidates = set(preview.main_peak_rts.values()) if preview.main_peak_rts else set()
+candidate_rts = sorted([x for x in raw_candidates if x > 0])
+if not candidate_rts:
+    candidate_rts = [16.366]
 
 with col3:
     selected_main_rt = st.selectbox(
@@ -98,6 +101,7 @@ matrix_result = HplcComparator.build_or_merge_matrix(
     target_wavelength=selected_wl
 )
 
+# Header formatting with 3-decimal fixed precision
 col_headers = ["Sr. No.", "Batch No."]
 for col in matrix_result.master_columns:
     label = col.peak_name if col.peak_name else "Unk"
@@ -113,6 +117,30 @@ for row in matrix_result.batch_rows:
 
 df_matrix = pd.DataFrame(display_rows, columns=col_headers)
 
+# Styling function to display ICH Q3A colors directly in Streamlit
+def style_matrix_table(df):
+    styles = pd.DataFrame("", index=df.index, columns=df.columns)
+    peak_cols = df.columns[2:]
+
+    for col_idx, col_name in enumerate(peak_cols):
+        master_col = matrix_result.master_columns[col_idx]
+        is_api = master_col.is_main_peak
+
+        for row_idx in df.index:
+            val = df.loc[row_idx, col_name]
+            if val != "" and val is not None:
+                try:
+                    num = float(val)
+                    if is_api:
+                        styles.loc[row_idx, col_name] = "background-color: #dcfce7; color: #166534; font-weight: bold;"
+                    elif num >= 0.10:
+                        styles.loc[row_idx, col_name] = "background-color: #fed7aa; color: #9a3412; font-weight: bold;"
+                    elif num >= 0.05:
+                        styles.loc[row_idx, col_name] = "background-color: #fef9c3; color: #854d0e; font-weight: bold;"
+                except ValueError:
+                    pass
+    return styles
+
 st.subheader("Analytical Impurity Comparison Matrix")
 
 st.markdown("""
@@ -123,7 +151,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-st.dataframe(df_matrix, use_container_width=True, hide_index=True)
+st.dataframe(df_matrix.style.apply(style_matrix_table, axis=None), use_container_width=True, hide_index=True)
 
 final_excel_bytes = ExcelExporter.generate(matrix_result)
 st.download_button(
