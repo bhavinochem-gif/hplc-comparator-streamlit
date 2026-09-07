@@ -7,85 +7,128 @@ from parser import HplcPdfParser
 
 st.set_page_config(page_title="HPLC Batch Impurity Matrix Comparator", layout="wide")
 
-st.title("📊 HPLC Batch-wise Impurity Matrix Comparator")
-st.markdown("Upload multiple HPLC PDF reports to automatically align retention times and generate the exact matrix spreadsheet layout.")
+st.title("🔬 HPLC Batch-wise Impurity Matrix Comparator")
+st.markdown("Automate comparative analytical impurity profiling across multiple batches with support for incremental Excel merging.")
 
-uploaded_files = st.file_uploader(
-    "Upload HPLC PDF Reports",
-    type=["pdf"],
-    accept_multiple_files=True
-)
+# Ingestion Panels
+col_up1, col_up2 = st.columns([1, 1])
 
-if not uploaded_files:
-    st.info("Upload 2 or more HPLC PDF reports to generate the comparison matrix.")
+with col_up1:
+    existing_excel_file = st.file_uploader(
+        "📂 (Optional) Upload Existing Comparison Matrix (.xlsx)",
+        type=["xlsx"],
+        help="Upload an existing HPLC comparison spreadsheet to append new PDF data into the same workbook."
+    )
+
+with col_up2:
+    new_pdf_files = st.file_uploader(
+        "📄 Upload New HPLC PDF Reports (Waters, Chromeleon, Agilent)",
+        type=["pdf"],
+        accept_multiple_files=True
+    )
+
+if not existing_excel_file and not new_pdf_files:
+    st.info("Upload new HPLC PDF reports, or upload an existing Excel matrix to append more batches.")
     st.stop()
 
 parser = HplcPdfParser()
-reports = []
-for f in uploaded_files:
-    content = f.read()
-    rep = parser.parse(content, f.name)
-    reports.append(rep)
+new_reports = []
+if new_pdf_files:
+    for f in new_pdf_files:
+        content = f.read()
+        rep = parser.parse(content, f.name)
+        new_reports.append(rep)
+
+with st.expander("🔍 Extraction Log & Ingested Files Status", expanded=False):
+    if existing_excel_file:
+        st.info(f"Loaded existing comparison workbook: **{existing_excel_file.name}**")
+    for r in new_reports:
+        if len(r.peaks) > 0:
+            st.success(f"**{r.file_name}** — Injected: `{r.sample_name}` | Batch: `{r.batch_id}` | Peaks: **{len(r.peaks)}**")
+        else:
+            st.error(f"**{r.file_name}** — ⚠️ 0 peaks detected. Ensure it is a vector digital PDF.")
+
+# Alignment Parameters
+col1, col2, col3 = st.columns([1, 1, 1.2])
 
 all_detected_wl = set()
-for r in reports:
+for r in new_reports:
     all_detected_wl.update(r.detected_wavelengths)
 available_wl_list = sorted(list(all_detected_wl))
 
-col1, col2, col3 = st.columns([1, 1, 1.2])
 with col1:
-    tolerance = st.slider("RT Tolerance Window (± min)", min_value=0.01, max_value=0.20, value=0.05, step=0.01)
+    rrt_tolerance = st.slider(
+        "RRT Tolerance Window (± RRT)",
+        min_value=0.002,
+        max_value=0.030,
+        value=0.010,
+        step=0.001,
+        format="%.3f"
+    )
 
 with col2:
     wl_options = ["All Channels"] + [f"{wl} nm" for wl in available_wl_list]
     selected_wl_label = st.selectbox("DAD/PDA Channel", options=wl_options, index=0)
     selected_wl = int(selected_wl_label.replace(" nm", "")) if selected_wl_label != "All Channels" else None
 
-# Preview to get candidate RTs
-preview = HplcComparator.build_horizontal_matrix(
-    reports=reports,
-    rt_tolerance=tolerance,
+excel_bytes_input = existing_excel_file.read() if existing_excel_file else None
+
+preview = HplcComparator.build_or_merge_matrix(
+    new_reports=new_reports,
+    existing_excel_bytes=excel_bytes_input,
+    rrt_tolerance=rrt_tolerance,
     target_main_rt=None,
     target_wavelength=selected_wl
 )
-candidate_rts = [col.rt for col in preview.master_columns]
+candidate_rts = sorted(list(set(preview.main_peak_rts.values()))) if preview.main_peak_rts else [16.366]
 
 with col3:
-    auto_idx = next((i for i, col in enumerate(preview.master_columns) if col.is_main_peak), 0)
     selected_main_rt = st.selectbox(
-        "Designate Main API Peak RT (min)",
+        "Reference API Main Peak RT (min)",
         options=candidate_rts,
-        index=auto_idx,
-        format_func=lambda x: f"{x:.3f} min (API)" if any(c.rt == x and c.is_main_peak for c in preview.master_columns) else f"{x:.3f} min"
+        index=0,
+        format_func=lambda x: f"~{x:.3f} min (API)"
     )
 
-# Final Matrix Build
-matrix_result = HplcComparator.build_horizontal_matrix(
-    reports=reports,
-    rt_tolerance=tolerance,
+matrix_result = HplcComparator.build_or_merge_matrix(
+    new_reports=new_reports,
+    existing_excel_bytes=excel_bytes_input,
+    rrt_tolerance=rrt_tolerance,
     target_main_rt=selected_main_rt,
     target_wavelength=selected_wl
 )
 
-# Build Display DataFrame
-table_headers = ["Sr. No.", "Batch No.", "Injection Name"] + [f"{col.peak_name}\nRT: {col.rt}\nRRT: {col.rrt}" for col in matrix_result.master_columns]
+col_headers = ["Sr. No.", "Batch No."]
+for col in matrix_result.master_columns:
+    label = col.peak_name if col.peak_name else "Unk"
+    col_headers.append(f"{label}\nRT: {col.rt:.3f}\nRRT: {col.rrt:.3f}")
+
 display_rows = []
 for row in matrix_result.batch_rows:
-    r_list = [row["Sr. No."], row["Batch No."], row["Injection Name"]]
+    r_vals = [row["Sr. No."], row["Batch No."]]
     for col in matrix_result.master_columns:
-        r_list.append(row.get(col.rt, ""))
-    display_rows.append(r_list)
+        v = row.get(col.rrt, "")
+        r_vals.append(v if v != "" else "")
+    display_rows.append(r_vals)
 
-df_matrix = pd.DataFrame(display_rows, columns=table_headers)
+df_matrix = pd.DataFrame(display_rows, columns=col_headers)
 
-st.subheader("Comparative Impurity Matrix")
+st.subheader("Analytical Impurity Comparison Matrix")
+
+st.markdown("""
+<div style="display: flex; gap: 20px; font-size: 0.85rem; margin-bottom: 12px;">
+  <div><span style="background-color: #dcfce7; padding: 3px 10px; border-radius: 3px; border: 1px solid #86efac; font-weight: bold; color: #166534;">■</span> Main API Peak (RRT = 1.000)</div>
+  <div><span style="background-color: #fef9c3; padding: 3px 10px; border-radius: 3px; border: 1px solid #fde047; font-weight: bold; color: #854d0e;">■</span> Impurity &ge; 0.05% (ICH Reporting)</div>
+  <div><span style="background-color: #fed7aa; padding: 3px 10px; border-radius: 3px; border: 1px solid #fdba74; font-weight: bold; color: #9a3412;">■</span> Impurity &ge; 0.10% (ICH Identification)</div>
+</div>
+""", unsafe_allow_html=True)
+
 st.dataframe(df_matrix, use_container_width=True, hide_index=True)
 
-# Export to Excel
-excel_bytes = ExcelExporter.generate(matrix_result)
+final_excel_bytes = ExcelExporter.generate(matrix_result)
 st.download_button(
-    label="📥 Download Horizontal Matrix Spreadsheet (.xlsx)",
-    data=excel_bytes,
+    label="📥 Download Updated Comparison Matrix (.xlsx)",
+    data=final_excel_bytes,
     file_name="HPLC_Batch_Impurity_Matrix.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
