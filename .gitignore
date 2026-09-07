@@ -5,4 +5,5 @@ __pycache__/
 venv/
 .streamlit/secrets.toml
 *.xlsx
+*.pdf
 .DS_Store
