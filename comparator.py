@@ -1,12 +1,14 @@
+import io
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
+import openpyxl
 from parser import HplcReport, Peak
 
 
 @dataclass
 class MasterPeakColumn:
-    rt: float
     rrt: float
+    rt: float
     peak_name: str
     is_main_peak: bool
 
@@ -14,114 +16,188 @@ class MasterPeakColumn:
 @dataclass
 class BatchComparisonResult:
     master_columns: List[MasterPeakColumn]
-    batch_rows: List[Dict[str, any]]  # Each row corresponds to one PDF report
+    batch_rows: List[Dict[str, any]]
     active_wavelength: Optional[int]
     available_wavelengths: List[int]
+    main_peak_rts: Dict[str, float]
 
 
 class HplcComparator:
 
     @staticmethod
-    def build_horizontal_matrix(
-        reports: List[HplcReport],
-        rt_tolerance: float = 0.05,
+    def parse_existing_excel(excel_bytes: bytes) -> Tuple[List[MasterPeakColumn], List[Dict[str, any]]]:
+        """Parses a previously exported HPLC_Batch_Impurity_Matrix.xlsx workbook back into structured memory."""
+        wb = openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=True)
+        ws = wb.active
+
+        existing_columns: List[MasterPeakColumn] = []
+        start_col = 4
+        max_col = ws.max_column
+
+        # Read master columns from Rows 1, 2, 3
+        for c in range(start_col, max_col + 1):
+            name_val = ws.cell(row=1, column=c).value
+            rt_val = ws.cell(row=2, column=c).value
+            rrt_val = ws.cell(row=3, column=c).value
+
+            if rrt_val is not None:
+                try:
+                    rrt = round(float(rrt_val), 3)
+                    rt = round(float(rt_val), 3) if rt_val is not None else 0.0
+                    peak_name = str(name_val).strip() if name_val is not None else ""
+                    is_main = abs(rrt - 1.0) < 0.005 or peak_name.upper() == "RIM"
+                    existing_columns.append(MasterPeakColumn(
+                        rrt=rrt,
+                        rt=rt,
+                        peak_name=peak_name,
+                        is_main_peak=is_main
+                    ))
+                except ValueError:
+                    continue
+
+        # Read batch rows from Row 4 downwards
+        existing_rows: List[Dict[str, any]] = []
+        for r in range(4, ws.max_row + 1):
+            sr_no = ws.cell(row=r, column=1).value
+            batch_no = ws.cell(row=r, column=2).value
+            if batch_no is None and sr_no is None:
+                continue
+
+            row_dict = {
+                "Sr. No.": sr_no or (len(existing_rows) + 1),
+                "Batch No.": str(batch_no or "").strip()
+            }
+            for c_idx, col in enumerate(existing_columns, start=start_col):
+                val = ws.cell(row=r, column=c_idx).value
+                if val is not None and val != "":
+                    try:
+                        row_dict[col.rrt] = float(val)
+                    except ValueError:
+                        row_dict[col.rrt] = val
+                else:
+                    row_dict[col.rrt] = ""
+            existing_rows.append(row_dict)
+
+        return existing_columns, existing_rows
+
+    @classmethod
+    def build_or_merge_matrix(
+        cls,
+        new_reports: List[HplcReport],
+        existing_excel_bytes: Optional[bytes] = None,
+        rrt_tolerance: float = 0.010,
         target_main_rt: Optional[float] = None,
         target_wavelength: Optional[int] = None
     ) -> BatchComparisonResult:
-        # 1. Available wavelengths
+        existing_cols: List[MasterPeakColumn] = []
+        existing_rows: List[Dict[str, any]] = []
+
+        if existing_excel_bytes:
+            try:
+                existing_cols, existing_rows = cls.parse_existing_excel(existing_excel_bytes)
+            except Exception:
+                pass
+
+        # Collect unique wavelengths
         all_wl: Set[int] = set()
-        for r in reports:
+        for r in new_reports:
             all_wl.update(r.detected_wavelengths)
         available_wl_list = sorted(list(all_wl))
 
-        active_wavelength = None
-        if target_wavelength and target_wavelength > 0:
-            active_wavelength = target_wavelength
-        elif available_wl_list:
-            active_wavelength = available_wl_list[0]
+        active_wavelength = (
+            target_wavelength
+            if target_wavelength and target_wavelength > 0
+            else (available_wl_list[0] if available_wl_list else None)
+        )
 
-        # 2. Filter peaks by wavelength
-        filtered_peaks: Dict[str, List[Peak]] = {}
-        for r in reports:
-            filtered_peaks[r.file_name] = [
+        # Resolve Main Peak and RRTs for new reports
+        report_main_rts: Dict[str, float] = {}
+        report_peaks_rrt: Dict[str, List[Tuple[Peak, float]]] = {}
+
+        for r in new_reports:
+            p_list = [
                 p for p in r.peaks
                 if active_wavelength is None or p.wavelength == 0 or p.wavelength == active_wavelength
             ]
+            if not p_list:
+                report_main_rts[r.file_name] = 0.0
+                report_peaks_rrt[r.file_name] = []
+                continue
 
-        # 3. Cluster master retention times across all reports
-        ref_rts: List[float] = []
-        for p_list in filtered_peaks.values():
+            if target_main_rt and target_main_rt > 0:
+                main_rt = min(p_list, key=lambda p: abs(p.retention_time - target_main_rt)).retention_time
+            else:
+                main_rt = max(p_list, key=lambda p: p.percent_area).retention_time
+            report_main_rts[r.file_name] = main_rt
+
+            rrt_items = []
             for p in p_list:
-                if not any(abs(p.retention_time - ref) <= rt_tolerance for ref in ref_rts):
-                    ref_rts.append(p.retention_time)
-        ref_rts.sort()
+                if p.rel_rt is not None and p.rel_rt > 0:
+                    c_rrt = round(p.rel_rt, 3)
+                elif main_rt > 0:
+                    c_rrt = round(p.retention_time / main_rt, 3)
+                else:
+                    c_rrt = 1.0
+                rrt_items.append((p, c_rrt))
+            report_peaks_rrt[r.file_name] = rrt_items
 
-        # 4. Resolve main API peak
-        main_peak_rt = 0.0
-        if target_main_rt and target_main_rt > 0:
-            for rt in ref_rts:
-                if abs(rt - target_main_rt) <= rt_tolerance:
-                    main_peak_rt = rt
-                    break
+        # Seed master columns with existing columns from Excel
+        master_columns: List[MasterPeakColumn] = list(existing_cols)
 
-        if main_peak_rt == 0.0 and ref_rts:
-            best_rt = ref_rts[0]
-            max_avg_area = -1.0
-            for rt in ref_rts:
-                tot_area = sum(
-                    p.percent_area for r in reports
-                    for p in filtered_peaks[r.file_name]
-                    if abs(p.retention_time - rt) <= rt_tolerance
-                )
-                avg_area = tot_area / len(reports) if reports else 0.0
-                if avg_area > max_avg_area:
-                    max_avg_area = avg_area
-                    best_rt = rt
-            main_peak_rt = best_rt
+        # Merge peaks from new PDF reports
+        for r in new_reports:
+            for p, p_rrt in report_peaks_rrt[r.file_name]:
+                matched = next((c for c in master_columns if abs(c.rrt - p_rrt) <= rrt_tolerance), None)
+                if matched:
+                    if not matched.peak_name and p.name.lower() not in ["unk", "unknown", ""]:
+                        matched.peak_name = p.name
+                else:
+                    is_main = abs(p_rrt - 1.0) <= rrt_tolerance
+                    name = p.name if p.name.lower() not in ["unk", "unknown", ""] else ("RIM" if is_main else "")
+                    master_columns.append(MasterPeakColumn(
+                        rrt=p_rrt,
+                        rt=round(p.retention_time, 3),
+                        peak_name=name,
+                        is_main_peak=is_main
+                    ))
 
-        # 5. Build Master Columns (representing each Impurity / RT position)
-        master_columns: List[MasterPeakColumn] = []
-        for rt in ref_rts:
-            is_main = abs(rt - main_peak_rt) <= rt_tolerance
-            
-            # Find best RRT (prefer parsed rel_rt, otherwise compute from main_peak_rt)
-            rrt = round(rt / main_peak_rt, 3) if main_peak_rt > 0 else 1.0
-            for r in reports:
-                match = next((p for p in filtered_peaks[r.file_name] if abs(p.retention_time - rt) <= rt_tolerance and p.rel_rt), None)
-                if match and match.rel_rt:
-                    rrt = match.rel_rt
-                    break
+        # Sort columns in ascending order by RRT
+        master_columns.sort(key=lambda c: c.rrt)
 
-            peak_name = "RIM" if is_main else "Unk"
-            for r in reports:
-                match = next((p for p in filtered_peaks[r.file_name] if abs(p.retention_time - rt) <= rt_tolerance and p.name.lower() not in ["unk", "unknown"]), None)
-                if match:
-                    peak_name = match.name
-                    break
-
-            master_columns.append(MasterPeakColumn(
-                rt=round(rt, 3),
-                rrt=round(rrt, 3),
-                peak_name=peak_name,
-                is_main_peak=is_main
-            ))
-
-        # 6. Build Batch Rows (one row per report file)
-        batch_rows = []
-        for idx, r in enumerate(reports, start=1):
-            row_data = {
-                "Sr. No.": idx,
-                "Batch No.": r.batch_id or r.sample_name or r.file_name,
-                "Injection Name": r.sample_name or r.file_name
-            }
+        # Ensure existing batch rows include newly detected column keys
+        combined_rows: List[Dict[str, any]] = []
+        for r in existing_rows:
+            updated_r = dict(r)
             for col in master_columns:
-                match = next((p for p in filtered_peaks[r.file_name] if abs(p.retention_time - col.rt) <= rt_tolerance), None)
-                row_data[col.rt] = f"{match.percent_area:.2f}" if match else ""
-            batch_rows.append(row_data)
+                if col.rrt not in updated_r:
+                    updated_r[col.rrt] = ""
+            combined_rows.append(updated_r)
+
+        # Append new PDF batch rows
+        next_sr_no = len(combined_rows) + 1
+        for r in new_reports:
+            b_label = r.batch_id or r.sample_name or r.file_name
+            row_data = {
+                "Sr. No.": next_sr_no,
+                "Batch No.": b_label
+            }
+            next_sr_no += 1
+
+            for col in master_columns:
+                match = next(
+                    (p for p, p_rrt in report_peaks_rrt[r.file_name] if abs(p_rrt - col.rrt) <= rrt_tolerance),
+                    None
+                )
+                if match:
+                    row_data[col.rrt] = 0 if match.percent_area == 0.0 else match.percent_area
+                else:
+                    row_data[col.rrt] = ""
+            combined_rows.append(row_data)
 
         return BatchComparisonResult(
             master_columns=master_columns,
-            batch_rows=batch_rows,
+            batch_rows=combined_rows,
             active_wavelength=active_wavelength,
-            available_wavelengths=available_wl_list
+            available_wavelengths=available_wl_list,
+            main_peak_rts=report_main_rts
         )
