@@ -8,7 +8,7 @@ from parser import HplcPdfParser
 st.set_page_config(page_title="HPLC Batch Impurity Matrix Comparator", layout="wide")
 
 st.title("🔬 HPLC Batch-wise Impurity Matrix Comparator")
-st.markdown("Automate comparative analytical impurity profiling across multiple batches with dynamic column detection and incremental Excel merging.")
+st.markdown("Automated impurity profiling across multiple batches with strict **RRT-Priority matching** and incremental Excel merging.")
 
 col_up1, col_up2 = st.columns([1, 1])
 
@@ -16,7 +16,7 @@ with col_up1:
     existing_excel_file = st.file_uploader(
         "📂 (Optional) Upload Existing Comparison Matrix (.xlsx)",
         type=["xlsx"],
-        help="Upload an existing HPLC comparison spreadsheet to append new PDF data into the same workbook."
+        help="Upload a previously downloaded matrix to append new PDF batches to the same workbook."
     )
 
 with col_up2:
@@ -56,12 +56,13 @@ available_wl_list = sorted(list(all_detected_wl))
 
 with col1:
     rrt_tolerance = st.slider(
-        "RRT Tolerance Window (± RRT)",
+        "RRT Matching Tolerance Window (± RRT)",
         min_value=0.002,
         max_value=0.030,
         value=0.010,
         step=0.001,
-        format="%.3f"
+        format="%.3f",
+        help="Priority selection window: peaks are assigned to the closest matching RRT column within this threshold."
     )
 
 with col2:
@@ -79,7 +80,6 @@ preview = HplcComparator.build_or_merge_matrix(
     target_wavelength=selected_wl
 )
 
-# Filter candidate RTs to positive non-zero values
 raw_candidates = set(preview.main_peak_rts.values()) if preview.main_peak_rts else set()
 candidate_rts = sorted([x for x in raw_candidates if x > 0])
 if not candidate_rts:
@@ -90,7 +90,7 @@ with col3:
         "Reference API Main Peak RT (min)",
         options=candidate_rts,
         index=0,
-        format_func=lambda x: f"~{x:.3f} min (API)"
+        format_func=lambda x: f"~{x:.3f} min (API Reference)"
     )
 
 matrix_result = HplcComparator.build_or_merge_matrix(
@@ -101,7 +101,7 @@ matrix_result = HplcComparator.build_or_merge_matrix(
     target_wavelength=selected_wl
 )
 
-# Header formatting with 3-decimal fixed precision
+# Display Headers matching the horizontal matrix layout
 col_headers = ["Sr. No.", "Batch No."]
 for col in matrix_result.master_columns:
     label = col.peak_name if col.peak_name else "Unk"
@@ -117,7 +117,6 @@ for row in matrix_result.batch_rows:
 
 df_matrix = pd.DataFrame(display_rows, columns=col_headers)
 
-# Styling function to display ICH Q3A colors directly in Streamlit
 def style_matrix_table(df):
     styles = pd.DataFrame("", index=df.index, columns=df.columns)
     peak_cols = df.columns[2:]
