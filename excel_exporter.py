@@ -23,7 +23,6 @@ class ExcelExporter:
         fill_zebra = PatternFill(start_color="F8FAFC", end_color="F8FAFC", fill_type="solid")
         fill_white = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
 
-        # Analytical Highlight Fills & Text Colors
         fill_api = PatternFill(start_color="DCFCE7", end_color="DCFCE7", fill_type="solid")
         font_api = Font(name="Calibri", size=10, bold=True, color="166534")
 
@@ -38,10 +37,8 @@ class ExcelExporter:
         border_all = Border(left=b_thin, right=b_thin, top=b_thin, bottom=b_thin)
         border_header = Border(left=b_thin, right=b_thin, top=b_dark, bottom=b_dark)
 
-        # Freeze headers and batch identifiers
         ws.freeze_panes = "D4"
 
-        # Merged Identifier Headers
         ws.merge_cells("A1:A3")
         ws.cell(row=1, column=1, value="Sr. No.").alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
@@ -58,8 +55,12 @@ class ExcelExporter:
         for i, col in enumerate(res.master_columns):
             c_idx = start_col + i
             ws.cell(row=1, column=c_idx, value=col.peak_name or "")
-            ws.cell(row=2, column=c_idx, value=col.rt)
-            ws.cell(row=3, column=c_idx, value=col.rrt)
+            
+            c_rt = ws.cell(row=2, column=c_idx, value=col.rt)
+            c_rt.number_format = "0.000"
+
+            c_rrt = ws.cell(row=3, column=c_idx, value=col.rrt)
+            c_rrt.number_format = "0.000"
 
         for c in range(1, start_col + num_peaks):
             c1 = ws.cell(row=1, column=c)
@@ -75,7 +76,6 @@ class ExcelExporter:
                 cell.border = border_header
                 cell.alignment = Alignment(horizontal="center", vertical="center")
 
-        # Populate batch data rows
         for r_idx, b_row in enumerate(res.batch_rows, start=4):
             is_even = (r_idx % 2 == 0)
             row_base_fill = fill_zebra if is_even else fill_white
