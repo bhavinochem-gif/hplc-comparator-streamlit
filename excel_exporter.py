@@ -55,7 +55,7 @@ class ExcelExporter:
         for i, col in enumerate(res.master_columns):
             c_idx = start_col + i
             ws.cell(row=1, column=c_idx, value=col.peak_name or "")
-            
+
             c_rt = ws.cell(row=2, column=c_idx, value=col.rt)
             c_rt.number_format = "0.000"
 
