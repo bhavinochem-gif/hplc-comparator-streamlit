@@ -26,6 +26,7 @@ class HplcComparator:
 
     @staticmethod
     def parse_existing_excel(excel_bytes: bytes) -> Tuple[List[MasterPeakColumn], List[Dict[str, any]]]:
+        """Parses an existing HPLC_Batch_Impurity_Matrix.xlsx workbook back into memory."""
         wb = openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=True)
         ws = wb.active
 
@@ -33,6 +34,7 @@ class HplcComparator:
         start_col = 4
         max_col = ws.max_column
 
+        # Read master columns from Rows 1, 2, 3
         for c in range(start_col, max_col + 1):
             name_val = ws.cell(row=1, column=c).value
             rt_val = ws.cell(row=2, column=c).value
@@ -53,6 +55,7 @@ class HplcComparator:
                 except ValueError:
                     continue
 
+        # Read batch data rows from Row 4 downwards
         existing_rows: List[Dict[str, any]] = []
         for r in range(4, ws.max_row + 1):
             sr_no = ws.cell(row=r, column=1).value
@@ -106,6 +109,7 @@ class HplcComparator:
             else (available_wl_list[0] if available_wl_list else None)
         )
 
+        # 1. Resolve Main Peak RT for each injection
         report_main_rts: Dict[str, float] = {}
         report_peaks_rrt: Dict[str, List[Tuple[Peak, float]]] = {}
 
@@ -119,14 +123,13 @@ class HplcComparator:
                 report_peaks_rrt[r.file_name] = []
                 continue
 
-            # API Main Peak Identification
             if target_main_rt and target_main_rt > 0:
                 main_rt = min(p_list, key=lambda p: abs(p.retention_time - target_main_rt)).retention_time
             else:
                 main_rt = max(p_list, key=lambda p: p.percent_area).retention_time
             report_main_rts[r.file_name] = main_rt
 
-            # Dynamic RRT Calculation fallback (crucial for Agilent/Shimadzu)
+            # Priority 1: Native CDS Rel.Ret. | Priority 2: Calculated RT / Main_RT
             rrt_items = []
             for p in p_list:
                 if p.rel_rt is not None and p.rel_rt > 0:
@@ -138,12 +141,19 @@ class HplcComparator:
                 rrt_items.append((p, c_rrt))
             report_peaks_rrt[r.file_name] = rrt_items
 
+        # 2. Master Column Alignment strictly driven by RRT
         master_columns: List[MasterPeakColumn] = list(existing_cols)
 
-        # Merge peaks across all reports
         for r in new_reports:
             for p, p_rrt in report_peaks_rrt[r.file_name]:
-                matched = next((c for c in master_columns if abs(c.rrt - p_rrt) <= rrt_tolerance), None)
+                matched = None
+                best_diff = 999.0
+                for c in master_columns:
+                    diff = abs(c.rrt - p_rrt)
+                    if diff <= rrt_tolerance and diff < best_diff:
+                        best_diff = diff
+                        matched = c
+
                 if matched:
                     if not matched.peak_name and p.name.lower() not in ["unk", "unknown", ""]:
                         matched.peak_name = p.name
@@ -157,8 +167,10 @@ class HplcComparator:
                         is_main_peak=is_main
                     ))
 
+        # Sort columns in ascending order by RRT
         master_columns.sort(key=lambda c: c.rrt)
 
+        # Pad existing batch rows with any newly discovered impurity columns
         combined_rows: List[Dict[str, any]] = []
         for r in existing_rows:
             updated_r = dict(r)
@@ -167,6 +179,7 @@ class HplcComparator:
                     updated_r[col.rrt] = ""
             combined_rows.append(updated_r)
 
+        # 3. RRT-Priority Optimal 1-to-1 Value Assignment for new batches
         next_sr_no = len(combined_rows) + 1
         for r in new_reports:
             b_label = r.batch_id or r.sample_name or r.file_name
@@ -176,15 +189,32 @@ class HplcComparator:
             }
             next_sr_no += 1
 
+            # Candidate pairing: (rrt_difference, peak_object, column_rrt)
+            candidate_pairs = []
             for col in master_columns:
-                match = next(
-                    (p for p, p_rrt in report_peaks_rrt[r.file_name] if abs(p_rrt - col.rrt) <= rrt_tolerance),
-                    None
-                )
-                if match:
-                    row_data[col.rrt] = 0 if match.percent_area == 0.0 else match.percent_area
-                else:
-                    row_data[col.rrt] = ""
+                for p, p_rrt in report_peaks_rrt[r.file_name]:
+                    diff = abs(p_rrt - col.rrt)
+                    if diff <= rrt_tolerance:
+                        candidate_pairs.append((diff, p, col.rrt))
+
+            # Sort ascending by RRT distance (absolute priority to lowest RRT delta)
+            candidate_pairs.sort(key=lambda x: x[0])
+
+            assigned_peaks = set()
+            assigned_cols = set()
+            col_assigned_val = {}
+
+            for diff, p, col_rrt in candidate_pairs:
+                peak_id = id(p)
+                if peak_id not in assigned_peaks and col_rrt not in assigned_cols:
+                    assigned_peaks.add(peak_id)
+                    assigned_cols.add(col_rrt)
+                    col_assigned_val[col_rrt] = 0 if p.percent_area == 0.0 else p.percent_area
+
+            # Assign area percentages or empty string
+            for col in master_columns:
+                row_data[col.rrt] = col_assigned_val.get(col.rrt, "")
+
             combined_rows.append(row_data)
 
         return BatchComparisonResult(
