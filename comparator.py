@@ -26,7 +26,6 @@ class HplcComparator:
 
     @staticmethod
     def parse_existing_excel(excel_bytes: bytes) -> Tuple[List[MasterPeakColumn], List[Dict[str, any]]]:
-        """Parses a previously exported HPLC_Batch_Impurity_Matrix.xlsx workbook back into structured memory."""
         wb = openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=True)
         ws = wb.active
 
@@ -34,7 +33,6 @@ class HplcComparator:
         start_col = 4
         max_col = ws.max_column
 
-        # Read master columns from Rows 1, 2, 3
         for c in range(start_col, max_col + 1):
             name_val = ws.cell(row=1, column=c).value
             rt_val = ws.cell(row=2, column=c).value
@@ -55,7 +53,6 @@ class HplcComparator:
                 except ValueError:
                     continue
 
-        # Read batch rows from Row 4 downwards
         existing_rows: List[Dict[str, any]] = []
         for r in range(4, ws.max_row + 1):
             sr_no = ws.cell(row=r, column=1).value
@@ -98,7 +95,6 @@ class HplcComparator:
             except Exception:
                 pass
 
-        # Collect unique wavelengths
         all_wl: Set[int] = set()
         for r in new_reports:
             all_wl.update(r.detected_wavelengths)
@@ -110,7 +106,6 @@ class HplcComparator:
             else (available_wl_list[0] if available_wl_list else None)
         )
 
-        # Resolve Main Peak and RRTs for new reports
         report_main_rts: Dict[str, float] = {}
         report_peaks_rrt: Dict[str, List[Tuple[Peak, float]]] = {}
 
@@ -124,12 +119,14 @@ class HplcComparator:
                 report_peaks_rrt[r.file_name] = []
                 continue
 
+            # API Main Peak Identification
             if target_main_rt and target_main_rt > 0:
                 main_rt = min(p_list, key=lambda p: abs(p.retention_time - target_main_rt)).retention_time
             else:
                 main_rt = max(p_list, key=lambda p: p.percent_area).retention_time
             report_main_rts[r.file_name] = main_rt
 
+            # Dynamic RRT Calculation fallback (crucial for Agilent/Shimadzu)
             rrt_items = []
             for p in p_list:
                 if p.rel_rt is not None and p.rel_rt > 0:
@@ -141,10 +138,9 @@ class HplcComparator:
                 rrt_items.append((p, c_rrt))
             report_peaks_rrt[r.file_name] = rrt_items
 
-        # Seed master columns with existing columns from Excel
         master_columns: List[MasterPeakColumn] = list(existing_cols)
 
-        # Merge peaks from new PDF reports
+        # Merge peaks across all reports
         for r in new_reports:
             for p, p_rrt in report_peaks_rrt[r.file_name]:
                 matched = next((c for c in master_columns if abs(c.rrt - p_rrt) <= rrt_tolerance), None)
@@ -161,10 +157,8 @@ class HplcComparator:
                         is_main_peak=is_main
                     ))
 
-        # Sort columns in ascending order by RRT
         master_columns.sort(key=lambda c: c.rrt)
 
-        # Ensure existing batch rows include newly detected column keys
         combined_rows: List[Dict[str, any]] = []
         for r in existing_rows:
             updated_r = dict(r)
@@ -173,7 +167,6 @@ class HplcComparator:
                     updated_r[col.rrt] = ""
             combined_rows.append(updated_r)
 
-        # Append new PDF batch rows
         next_sr_no = len(combined_rows) + 1
         for r in new_reports:
             b_label = r.batch_id or r.sample_name or r.file_name
