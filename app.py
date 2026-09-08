@@ -8,27 +8,37 @@ from parser import HplcPdfParser
 st.set_page_config(page_title="HPLC Vertical Impurity Comparator", layout="wide")
 
 st.title("🔬 HPLC Vertical Impurity Matrix Comparator")
-st.markdown("Batch identifiers are automatically extracted from uploaded PDF filenames. Peaks are aligned vertically by Relative Retention Time (RRT).")
+st.markdown("Multi-batch analytical impurity profiling with automatic filename-based batch tracking, strict RRT priority matching, and incremental Excel workbook merging.")
 
-uploaded_files = st.file_uploader(
-    "Upload HPLC Analysis PDF Reports (Chromeleon, Waters, Agilent, Shimadzu)",
-    type=["pdf"],
-    accept_multiple_files=True
-)
+col_up1, col_up2 = st.columns([1, 1])
 
-if not uploaded_files:
-    st.info("Upload 2 or more HPLC PDF reports to generate the vertical comparison matrix.")
+with col_up1:
+    existing_excel_file = st.file_uploader(
+        "📂 (Optional) Upload Existing Vertical Matrix (.xlsx)",
+        type=["xlsx"],
+        help="Upload an existing vertical matrix. New PDF batches will append as columns to the right."
+    )
+
+with col_up2:
+    new_pdf_files = st.file_uploader(
+        "📄 Upload New HPLC PDF Reports (Chromeleon, Waters, Agilent, Shimadzu)",
+        type=["pdf"],
+        accept_multiple_files=True
+    )
+
+if not existing_excel_file and not new_pdf_files:
+    st.info("Upload new HPLC PDF reports, or upload an existing Excel matrix to append additional batches.")
     st.stop()
 
 with st.expander("⚙️ Optional: Custom Impurity RRT Specifications", expanded=False):
-    st.write("Specify known impurity names and their relative retention windows:")
+    st.write("Map target RRT windows to chemical impurity names:")
     default_specs = (
         "RIM-IMP-B, 0.850, 0.890\n"
         "RIM-IMP-A, 0.940, 0.980\n"
         "Degradant-1, 1.250, 1.310\n"
         "Dimer-Impurity, 1.750, 1.850"
     )
-    spec_text = st.text_area("Format: Name, Min RRT, Max RRT (one per line)", value=default_specs, height=110)
+    spec_text = st.text_area("Format: Name, Min RRT, Max RRT (one per line)", value=default_specs, height=105)
 
 custom_spec_list = []
 for line in spec_text.strip().splitlines():
@@ -44,23 +54,26 @@ for line in spec_text.strip().splitlines():
             pass
 
 parser = HplcPdfParser()
-reports = []
-for f in uploaded_files:
-    content = f.read()
-    rep = parser.parse(content, f.name)
-    reports.append(rep)
+new_reports = []
+if new_pdf_files:
+    for f in new_pdf_files:
+        content = f.read()
+        rep = parser.parse(content, f.name)
+        new_reports.append(rep)
 
-with st.expander("🔍 Ingested Batches & Peak Status", expanded=True):
-    for r in reports:
+with st.expander("🔍 Ingestion Log & Extracted Batch Status", expanded=True):
+    if existing_excel_file:
+        st.info(f"Loaded existing comparison workbook: **{existing_excel_file.name}**")
+    for r in new_reports:
         if len(r.peaks) > 0:
             st.success(f"**Batch:** `{r.batch_id}` | Source: `{r.cds_source}` | Peaks Extracted: **{len(r.peaks)}**")
         else:
-            st.error(f"**Batch:** `{r.batch_id}` — ⚠️ 0 peaks detected. Verify that the file is a digital vector PDF.")
+            st.error(f"**Batch:** `{r.batch_id}` — ⚠️ 0 peaks detected. Ensure it is a vector digital PDF.")
 
 col1, col2, col3 = st.columns([1, 1, 1.2])
 
 all_detected_wl = set()
-for r in reports:
+for r in new_reports:
     all_detected_wl.update(r.detected_wavelengths)
 available_wl_list = sorted(list(all_detected_wl))
 
@@ -79,8 +92,11 @@ with col2:
     selected_wl_label = st.selectbox("Channel / Wavelength", options=wl_options, index=0)
     selected_wl = int(selected_wl_label.replace(" nm", "")) if selected_wl_label != "All Channels" else None
 
-preview = HplcComparator.build_vertical_matrix(
-    reports=reports,
+excel_bytes_input = existing_excel_file.read() if existing_excel_file else None
+
+preview = HplcComparator.build_or_merge_vertical_matrix(
+    new_reports=new_reports,
+    existing_excel_bytes=excel_bytes_input,
     rrt_tolerance=rrt_tolerance,
     target_main_rt=None,
     target_wavelength=selected_wl,
@@ -100,8 +116,9 @@ with col3:
         format_func=lambda x: f"~{x:.3f} min (Main API)"
     )
 
-result = HplcComparator.build_vertical_matrix(
-    reports=reports,
+result = HplcComparator.build_or_merge_vertical_matrix(
+    new_reports=new_reports,
+    existing_excel_bytes=excel_bytes_input,
     rrt_tolerance=rrt_tolerance,
     target_main_rt=selected_main_rt,
     target_wavelength=selected_wl,
