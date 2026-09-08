@@ -120,6 +120,7 @@ class HplcPdfParser:
         if not clean_line or lower_line.startswith("total") or "ret.time" in lower_line or "area %" in lower_line:
             return
 
+        # Separate numeric values stuck to letters or adjacent decimals
         clean_line = re.sub(r"(\d+\.\d{2,4})([A-Za-z])", r"\1 \2", clean_line)
         clean_line = re.sub(r"(\.\d{2,4})(\d+\.\d+)", r"\1 \2", clean_line)
 
@@ -127,18 +128,19 @@ class HplcPdfParser:
         if len(tokens) < 3:
             return
 
+        # Strip non-numeric peak integration types from the right
         if not re.match(r"^\d+(?:\.\d+)?$", tokens[-1].replace(",", "")):
             tokens.pop()
 
         if len(tokens) < 3:
             return
 
-        peak_no = None
+        # Discard leading peak index number if present
         if tokens[0].isdigit() and len(tokens) > 3:
             try:
                 val = float(tokens[1].replace(",", ""))
                 if 0.2 <= val <= 250.0:
-                    peak_no = int(tokens.pop(0))
+                    tokens.pop(0)
             except ValueError:
                 pass
 
