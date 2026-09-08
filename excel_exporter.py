@@ -37,6 +37,7 @@ class ExcelExporter:
         border_all = Border(left=b_thin, right=b_thin, top=b_thin, bottom=b_thin)
         border_summary = Border(left=b_thin, right=b_thin, top=b_dark, bottom=b_dark)
 
+        # Freeze headers and row descriptions (Columns A-D and Row 1)
         ws.freeze_panes = "E2"
 
         headers = ["Sr. No.", "Name of Impurity", "Mean RT (min)", "RRT"] + res.batch_names
@@ -129,13 +130,13 @@ class ExcelExporter:
             curr_row += 1
 
         ws.column_dimensions["A"].width = 8
-        ws.column_dimensions["B"].width = 24
+        ws.column_dimensions["B"].width = 25
         ws.column_dimensions["C"].width = 15
         ws.column_dimensions["D"].width = 12
 
         for i in range(len(res.batch_names)):
             col_letter = get_column_letter(5 + i)
-            ws.column_dimensions[col_letter].width = 20
+            ws.column_dimensions[col_letter].width = 22
 
         buf = io.BytesIO()
         wb.save(buf)
