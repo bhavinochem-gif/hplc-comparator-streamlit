@@ -2,141 +2,126 @@ import io
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
-from comparator import VerticalComparisonResult
+from comparator import ComparisonResult
 
 
 class ExcelExporter:
 
     @staticmethod
-    def generate(res: VerticalComparisonResult) -> bytes:
+    def generate(res: ComparisonResult) -> bytes:
         wb = openpyxl.Workbook()
         ws = wb.active
-        ws.title = "Vertical Impurity Matrix"
+        ws.title = "HPLC Comparison"
         ws.views.sheetView[0].showGridLines = True
 
-        font_header = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
         font_bold = Font(name="Calibri", size=10, bold=True)
         font_regular = Font(name="Calibri", size=10)
 
-        fill_navy = PatternFill(start_color="1E3A8A", end_color="1E3A8A", fill_type="solid")
-        fill_zebra = PatternFill(start_color="F8FAFC", end_color="F8FAFC", fill_type="solid")
-        fill_white = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
-        fill_summary = PatternFill(start_color="E2E8F0", end_color="E2E8F0", fill_type="solid")
+        fill_api = PatternFill(start_color="DCFCE7", end_color="DCFCE7", fill_type="solid")      # Mint Green
+        fill_ident = PatternFill(start_color="FED7AA", end_color="FED7AA", fill_type="solid")    # Orange (>= 0.10%)
+        fill_rep = PatternFill(start_color="FEF9C3", end_color="FEF9C3", fill_type="solid")      # Yellow (>= 0.05%)
 
-        fill_api = PatternFill(start_color="DCFCE7", end_color="DCFCE7", fill_type="solid")
-        font_api = Font(name="Calibri", size=10, bold=True, color="166534")
-
-        fill_ident = PatternFill(start_color="FED7AA", end_color="FED7AA", fill_type="solid")
-        font_ident = Font(name="Calibri", size=10, bold=True, color="9A3412")
-
-        fill_rep = PatternFill(start_color="FEF9C3", end_color="FEF9C3", fill_type="solid")
-        font_rep = Font(name="Calibri", size=10, bold=True, color="854D0E")
-
-        b_thin = Side(border_style="thin", color="CBD5E1")
-        b_dark = Side(border_style="medium", color="64748B")
+        b_thin = Side(border_style="thin", color="000000")
         border_all = Border(left=b_thin, right=b_thin, top=b_thin, bottom=b_thin)
-        border_summary = Border(left=b_thin, right=b_thin, top=b_dark, bottom=b_dark)
 
-        # Freeze headers and row descriptions (Columns A-D and Row 1)
-        ws.freeze_panes = "E2"
+        # Row 1: Merged 'Batch No.' (A1:C1) and Batch Headers (D1, E1, ...)
+        ws.merge_cells("A1:C1")
+        cell_batch_lbl = ws.cell(row=1, column=1, value="Batch No.")
+        cell_batch_lbl.alignment = Alignment(horizontal="center", vertical="center")
+        cell_batch_lbl.font = font_bold
 
-        headers = ["Sr. No.", "Name of Impurity", "Mean RT (min)", "RRT"] + res.batch_names
-        ws.append(headers)
+        for c in range(1, 4):
+            ws.cell(row=1, column=c).border = border_all
 
-        for c_idx in range(1, len(headers) + 1):
-            cell = ws.cell(row=1, column=c_idx)
-            cell.font = font_header
-            cell.fill = fill_navy
-            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            cell.border = border_all
-        ws.row_dimensions[1].height = 28
+        for idx, b_name in enumerate(res.batch_names, start=4):
+            c_hdr = ws.cell(row=1, column=idx, value=b_name)
+            c_hdr.alignment = Alignment(horizontal="center", vertical="center")
+            c_hdr.font = font_bold
+            c_hdr.border = border_all
 
-        curr_row = 2
+        # Row 2: Sub-headers matching Image 2
+        ws.cell(row=2, column=1, value="Peak name").alignment = Alignment(horizontal="center", vertical="center")
+        ws.cell(row=2, column=2, value="Ret.Time").alignment = Alignment(horizontal="center", vertical="center")
+        ws.cell(row=2, column=3, value="Rel.Ret.Time").alignment = Alignment(horizontal="center", vertical="center")
+
+        for c in range(1, 4):
+            ws.cell(row=2, column=c).font = font_bold
+            ws.cell(row=2, column=c).border = border_all
+
+        for idx in range(4, 4 + len(res.batch_names)):
+            c_sub = ws.cell(row=2, column=idx, value="Area %")
+            c_sub.alignment = Alignment(horizontal="center", vertical="center")
+            c_sub.font = font_bold
+            c_sub.border = border_all
+
+        # Rows 3+: Data rows
+        curr_row = 3
         for item in res.rows:
-            is_even = (curr_row % 2 == 0)
-            base_fill = fill_zebra if is_even else fill_white
+            # Col 1: Peak Name
+            c_name = ws.cell(row=curr_row, column=1, value=item.name)
+            c_name.alignment = Alignment(horizontal="left", vertical="center")
+            c_name.font = font_bold if item.is_main else font_regular
+            c_name.border = border_all
 
-            ws.cell(row=curr_row, column=1, value=item.sr_no).alignment = Alignment(horizontal="center")
-            ws.cell(row=curr_row, column=2, value=item.name).alignment = Alignment(horizontal="left")
+            # Col 2: Ret.Time
+            try:
+                rt_val = float(item.rt_str)
+                c_rt = ws.cell(row=curr_row, column=2, value=rt_val)
+                c_rt.number_format = "0.000" if len(item.rt_str.split('.')[-1]) > 2 else "0.00"
+            except ValueError:
+                c_rt = ws.cell(row=curr_row, column=2, value=item.rt_str)
+            c_rt.alignment = Alignment(horizontal="center", vertical="center")
+            c_rt.font = font_bold if item.is_main else font_regular
+            c_rt.border = border_all
 
-            c_rt = ws.cell(row=curr_row, column=3, value=item.mean_rt)
-            c_rt.number_format = "0.000"
-            c_rt.alignment = Alignment(horizontal="right")
+            # Col 3: Rel.Ret.Time
+            try:
+                rrt_val = float(item.rrt_str)
+                c_rrt = ws.cell(row=curr_row, column=3, value=rrt_val)
+                c_rrt.number_format = "0.000"
+            except ValueError:
+                c_rrt = ws.cell(row=curr_row, column=3, value=item.rrt_str)
+            c_rrt.alignment = Alignment(horizontal="center", vertical="center")
+            c_rrt.font = font_bold if item.is_main else font_regular
+            c_rrt.border = border_all
 
-            c_rrt = ws.cell(row=curr_row, column=4, value=item.rrt)
-            c_rrt.number_format = "0.000"
-            c_rrt.alignment = Alignment(horizontal="right")
-
-            for c in range(1, 5):
-                ws.cell(row=curr_row, column=c).border = border_all
-                ws.cell(row=curr_row, column=c).font = font_bold if item.is_main else font_regular
-                ws.cell(row=curr_row, column=c).fill = base_fill
-
-            for b_idx, b_name in enumerate(res.batch_names, start=5):
+            # Col 4+: Batch Area %
+            for b_idx, b_name in enumerate(res.batch_names, start=4):
                 val = item.batch_values.get(b_name, "")
                 cell = ws.cell(row=curr_row, column=b_idx)
                 cell.border = border_all
 
                 if val != "":
-                    num_val = float(val)
-                    cell.value = num_val
-                    cell.number_format = "0.00" if num_val != 0 else "0"
-                    cell.alignment = Alignment(horizontal="right")
+                    num = float(val)
+                    cell.value = num
+                    cell.number_format = "0.00" if num != 0 else "0"
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
 
+                    # Apply Color Fills
                     if item.is_main:
                         cell.fill = fill_api
-                        cell.font = font_api
-                    elif num_val >= 0.10:
+                        cell.font = font_bold
+                    elif num >= 0.10:
                         cell.fill = fill_ident
-                        cell.font = font_ident
-                    elif num_val >= 0.05:
+                        cell.font = font_bold
+                    elif num >= 0.05:
                         cell.fill = fill_rep
-                        cell.font = font_rep
+                        cell.font = font_bold
                     else:
-                        cell.fill = base_fill
                         cell.font = font_regular
                 else:
                     cell.value = ""
-                    cell.fill = base_fill
 
             curr_row += 1
 
-        for s_row in res.summary_rows:
-            ws.cell(row=curr_row, column=1, value="").border = border_summary
-            ws.cell(row=curr_row, column=1).fill = fill_summary
-
-            c_lbl = ws.cell(row=curr_row, column=2, value=s_row["Name of Impurity"])
-            c_lbl.font = font_bold
-            c_lbl.alignment = Alignment(horizontal="left")
-            c_lbl.border = border_summary
-            c_lbl.fill = fill_summary
-
-            ws.cell(row=curr_row, column=3, value=s_row["Mean RT (min)"]).alignment = Alignment(horizontal="center")
-            ws.cell(row=curr_row, column=3).border = border_summary
-            ws.cell(row=curr_row, column=3).fill = fill_summary
-
-            ws.cell(row=curr_row, column=4, value=s_row["RRT"]).alignment = Alignment(horizontal="center")
-            ws.cell(row=curr_row, column=4).border = border_summary
-            ws.cell(row=curr_row, column=4).fill = fill_summary
-
-            for b_idx, b_name in enumerate(res.batch_names, start=5):
-                c_val = ws.cell(row=curr_row, column=b_idx, value=s_row[b_name])
-                c_val.font = font_bold
-                c_val.number_format = "0.00"
-                c_val.alignment = Alignment(horizontal="right")
-                c_val.border = border_summary
-                c_val.fill = fill_summary
-
-            curr_row += 1
-
-        ws.column_dimensions["A"].width = 8
-        ws.column_dimensions["B"].width = 25
-        ws.column_dimensions["C"].width = 15
-        ws.column_dimensions["D"].width = 12
+        # Column widths
+        ws.column_dimensions["A"].width = 16
+        ws.column_dimensions["B"].width = 12
+        ws.column_dimensions["C"].width = 14
 
         for i in range(len(res.batch_names)):
-            col_letter = get_column_letter(5 + i)
-            ws.column_dimensions[col_letter].width = 22
+            col_letter = get_column_letter(4 + i)
+            ws.column_dimensions[col_letter].width = 24
 
         buf = io.BytesIO()
         wb.save(buf)
